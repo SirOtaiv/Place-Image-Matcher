@@ -1,8 +1,7 @@
 import cv2
 import numpy as np
-import random
 
-def place_image_matcher(img_path1, img_path2, min_match_count=10):
+def place_image_matcher(img_path1, img_path2, min_match_count=15, output_matches="track_avancado_resultado.png"):
    img1 = cv2.imread(img_path1, cv2.IMREAD_COLOR)
    img2 = cv2.imread(img_path2, cv2.IMREAD_COLOR)
 
@@ -10,57 +9,66 @@ def place_image_matcher(img_path1, img_path2, min_match_count=10):
       print("Erro: Não foi possível carregar uma ou ambas as imagens. Verifique o caminho e nome dos arquivos.")
       exit()
 
-   orb = cv2.ORB_create()
+   gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+   gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
 
-   kp1, des1 = orb.detectAndCompute(img1, None)
-   kp2, des2 = orb.detectAndCompute(img2, None)
+   sift = cv2.SIFT_create()
+   kp1, des1 = sift.detectAndCompute(gray1, None)
+   kp2, des2 = sift.detectAndCompute(gray2, None)
 
-   if des1 is None or des2 is None:
-      print("Não há descritores suficientes nas imagens para comparação.")
-      exit()
+   if des1 is None or des2 is None or len(kp1) < 2 or len(kp2) < 2:
+      print("Atenção: Poucos keypoints detectados para comparação robusta.")
+      return False, 0
 
-   bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True) 
+   des1 = np.float32(des1)
+   des2 = np.float32(des2)
 
-   matches = bf.match(des1, des2)
-   matches = sorted(matches, key = lambda x:x.distance)
+   index_params = dict(algorithm=1, trees=5)
+   search_params = dict(checks=50)
+   flann = cv2.FlannBasedMatcher(index_params, search_params)
 
-   MIN_MATCH_COUNT = min_match_count 
+   matches = flann.knnMatch(des1, des2, k=2)
 
-   if len(matches) > MIN_MATCH_COUNT:
-      src_pts = np.float32([ kp1[m.queryIdx].pt for m in matches ]).reshape(-1,1,2)
-      dst_pts = np.float32([ kp2[m.trainIdx].pt for m in matches ]).reshape(-1,1,2)
+   good_matches = []
+   for m, n in matches:
+      if m.distance < 0.75 * n.distance:
+         good_matches.append(m)
 
-      M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+   if len(good_matches) < 4:
+      print(f"❌ Matches após Lowe Test insuficientes ({len(good_matches)}). Mínimo exigido: 4.")
+      return False, 0
 
-      matchesMask = mask.ravel().tolist()
-      inlier_count = sum(matchesMask)
-      
-      print(f"\n✅ Total de Pontos Validados (Inliers): {inlier_count}")
+   pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+   pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
-      if inlier_count >= MIN_MATCH_COUNT:
-         print("➡️ DECISÃO: As imagens SÃO do mesmo lugar (alto número de inliers).")
-      else:
-         print("➡️ DECISÃO: As imagens NÃO são do mesmo lugar (baixo número de inliers).")
+   H, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
 
-
-      draw_params = dict(matchColor = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)),
-                        singlePointColor = None,
-                        matchesMask = matchesMask, 
-                        flags = 2)
-
-      img_matches = cv2.drawMatches(img1, kp1, img2, kp2, matches, None, **draw_params)
-
-      output_filename = "track_output.png" 
-      cv2.imwrite(output_filename, img_matches)
-      print(f"🖼️ Imagem do track salva como: {output_filename}")
-      # cv2.imshow("Track de Pontos Validados", img_matches)
-      # cv2.waitKey(0)
-      # cv2.destroyAllWindows()
-
-   else:
-      print(f"\n❌ Não há matches suficientes ({len(matches)}). Mínimo exigido: {MIN_MATCH_COUNT}.")
-      print("➡️ DECISÃO: As imagens NÃO são do mesmo lugar.")
+   inliers_mask = mask.ravel().tolist()
+   inlier_matches = [m for i, m in enumerate(good_matches) if inliers_mask[i] == 1]
    
-   return
+   inlier_count = len(inlier_matches)
+   
+   print(f"\nMatches após Lowe Test: {len(good_matches)}")
+   print(f"✅ Inliers (Pontos Validados): {inlier_count}")
 
-place_image_matcher('stonehenge2.png', 'stonehenge1.png', 10)
+   resultado = cv2.drawMatches(
+        img1, kp1,
+        img2, kp2,
+        inlier_matches,
+        None,
+        flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+   )
+
+   cv2.imwrite(output_matches, resultado)
+   print(f"🖼️ Imagem do track salva como: {output_matches}")
+
+   mesmo_local = inlier_count >= min_match_count
+   
+   if mesmo_local:
+      print(f"➡️ DECISÃO: As imagens SÃO do mesmo local (Inliers: {inlier_count} / Mínimo: {min_match_count}).")
+   else:
+      print(f"➡️ DECISÃO: As imagens NÃO são do mesmo local (Inliers: {inlier_count} / Mínimo: {min_match_count}).")
+      
+   return mesmo_local, inlier_count
+
+place_image_matcher('colonia1.jpg', 'colonia2.jpg', 10)
